@@ -425,4 +425,204 @@ describe("published component contracts", () => {
     expect(GenericId.scope(codec.ast)).toContain("left");
     expect(GenericId.scope(codec.ast)).not.toContain(parentScope);
   });
+
+  it("binds one contract to three installations with pairwise-distinct scopes", () => {
+    const registry = componentsGeneric() as unknown as {
+      alpha: Component.Api<typeof spec, "alpha">;
+      beta: Component.Api<typeof spec, "beta">;
+      gamma: Component.Api<typeof spec, "gamma">;
+    };
+    const alpha = Component.bind(contract, registry.alpha);
+    const beta = Component.bind(contract, registry.beta);
+    const gamma = Component.bind(contract, registry.gamma);
+
+    // Every installation gets its own instance scope under the application.
+    // Component.bind preserves the native reference's address as the
+    // installation identity, but that identity is opaque: what the contract
+    // guarantees is that each mount is a distinct instance named after its
+    // installation, not any particular string encoding.
+    const scopeOf = (bound: Parameters<typeof Component.id>[0]) =>
+      GenericId.scope(Component.id(bound, "items").ast);
+    const scopes = [scopeOf(alpha), scopeOf(beta), scopeOf(gamma)];
+    expect(new Set(scopes).size).toBe(3);
+    for (const [index, name] of ["alpha", "beta", "gamma"].entries()) {
+      expect(scopes[index]).toContain("instance:");
+      expect(scopes[index]).toContain(name);
+    }
+    expect(scopes[0]).not.toBe(scopes[1]);
+    expect(scopes[1]).not.toBe(scopes[2]);
+
+    // Codecs are rebound from the definition scope to the installation's own
+    // scope, and they stay pairwise distinct.
+    const argsScopeOf = (bound: Parameters<typeof Component.id>[0]) => {
+      const ref = (bound as unknown as typeof alpha).items.get;
+      assert(ref._tag === "Confect");
+      return GenericId.scope(ref.args.fields.id.ast);
+    };
+    expect([argsScopeOf(alpha), argsScopeOf(beta), argsScopeOf(gamma)]).toEqual(
+      scopes,
+    );
+    // `rebase` rebuilds the returns codec, so its struct no longer exposes
+    // enumerable `fields`; compiling against a scope is the direct runtime
+    // check of which scope the codec carries. Each bound ref's `id` compiles
+    // to a Convex ID only under its own installation's scope—the nested
+    // `child` ID keeps its descendant instance scope, so it stays a string.
+    type BoundLike = Parameters<typeof Component.id>[0];
+    const compileReturns = (
+      bound: BoundLike,
+      compileScope: IdScope.IdScope,
+    ) => {
+      const ref = (bound as unknown as typeof alpha).items.create;
+      assert(ref._tag === "Confect");
+      return SchemaToValidator.compileReturnsSchema(ref.returns, compileScope);
+    };
+    const idAtOwnScope = v.object({
+      id: v.id("items"),
+      child: v.string(),
+      count: v.string(),
+    });
+    const rawStrings = v.object({
+      id: v.string(),
+      child: v.string(),
+      count: v.string(),
+    });
+    const bindings: ReadonlyArray<BoundLike> = [alpha, beta, gamma];
+    for (const [index, bound] of bindings.entries()) {
+      expect(compileReturns(bound, scopes[index]!)).toEqual(idAtOwnScope);
+      const otherScopes = scopes.filter((_, other) => other !== index);
+      for (const otherScope of otherScopes)
+        expect(compileReturns(bound, otherScope)).toEqual(rawStrings);
+    }
+    for (const bound of [alpha, beta, gamma])
+      expect(
+        Ref.decodeReturnsSync(bound.items.create, {
+          id: "one",
+          child: "two",
+          count: "3",
+        }),
+      ).toEqual({ id: "one", child: "two", count: 3 });
+
+    // The schema helpers use the same per-installation scope.
+    expect(GenericId.scope(Component.schema(beta, ItemId).ast)).toBe(scopes[1]);
+
+    // At the type level each installation owns its IDs, whether they come from
+    // wire decoding, `Component.id`, or `Component.schema`.
+    const fromAlpha = Ref.decodeReturnsSync(alpha.items.create, {
+      id: "one",
+      child: "two",
+      count: "3",
+    }).id;
+    const alphaId: Ref.Args<typeof alpha.items.get>["id"] = fromAlpha;
+    void alphaId;
+    // @ts-expect-error An alpha ID is not a beta ID.
+    const betaId: Ref.Args<typeof beta.items.get>["id"] = fromAlpha;
+    void betaId;
+    // @ts-expect-error Nor is it a gamma ID.
+    const gammaId: Ref.Args<typeof gamma.items.get>["id"] = fromAlpha;
+    void gammaId;
+    const alphaTableId: Ref.Args<typeof alpha.items.get>["id"] =
+      Schema.decodeUnknownSync(Component.id(alpha, "items"))("one");
+    void alphaTableId;
+    // @ts-expect-error Table IDs are per-installation too.
+    const betaTableId: Ref.Args<typeof beta.items.get>["id"] = alphaTableId;
+    void betaTableId;
+    const alphaCodec = Component.schema(alpha, ItemId);
+    const betaCodec = Component.schema(beta, ItemId);
+    const fromAlphaCodec: Ref.Args<typeof alpha.items.get>["id"] =
+      Schema.decodeUnknownSync(alphaCodec)("one");
+    void fromAlphaCodec;
+    // @ts-expect-error Reused codecs keep their installation's identity.
+    const fromBetaCodec: Ref.Args<typeof beta.items.get>["id"] =
+      Schema.decodeUnknownSync(alphaCodec)("one");
+    void fromBetaCodec;
+    expect(alphaCodec).not.toBe(betaCodec);
+    // Decoding an alpha-shaped value with beta's codec keeps the raw string;
+    // the scope is compile-time identity, not a runtime check.
+    expect(Schema.decodeUnknownSync(betaCodec)("one")).toBe("one");
+
+    // Boundary artifacts of the three bindings are distinct objects, and the
+    // contract can be bound again without inheriting any installation's scope.
+    expect(alpha).not.toBe(beta);
+    expect(beta).not.toBe(gamma);
+    expect(alpha.items).not.toBe(beta.items);
+    expect(alpha.items.create).not.toBe(beta.items.create);
+    const delta = Component.bind(contract, registry.alpha, {
+      parentScope: IdScope.component("@example/host"),
+    });
+    const deltaScope = GenericId.scope(Component.id(delta, "items").ast);
+    expect(scopes).not.toContain(deltaScope);
+  });
+
+  it("does not force schemas when one contract is bound three times", () => {
+    // Binding is pure bookkeeping: it rebases lazily and never forces the
+    // author's schema thunks. Three installations therefore cost three
+    // shallow bound trees, not three schema evaluations.
+    const args = vi.fn(() => ({ id: GenericId.GenericId("items", scope) }));
+    const returns = vi.fn(() => GenericId.GenericId("items", scope));
+    const error = vi.fn(() => Schema.Struct({ id: ItemId }));
+    const lazySpec = specFrom({
+      items: GroupSpec.make().addFunction(
+        FunctionSpec.publicQuery({ name: "get", args, returns, error }),
+      ),
+    });
+    const lazyContract = Component.make(lazySpec, scope, ["items"]);
+    const registry = componentsGeneric() as unknown as {
+      alpha: Component.Api<typeof lazySpec, "alpha">;
+      beta: Component.Api<typeof lazySpec, "beta">;
+      gamma: Component.Api<typeof lazySpec, "gamma">;
+    };
+    const alpha = Component.bind(lazyContract, registry.alpha);
+    const beta = Component.bind(lazyContract, registry.beta);
+    const gamma = Component.bind(lazyContract, registry.gamma);
+    for (const thunk of [args, returns, error])
+      expect(thunk).not.toHaveBeenCalled();
+
+    assert(
+      alpha.items.get._tag === "Confect" &&
+        beta.items.get._tag === "Confect" &&
+        gamma.items.get._tag === "Confect",
+    );
+    // Reading one installation's schemas memoises within that binding; the
+    // author's thunks are forced once in total, however many installations are
+    // bound. Each binding still rebases to its own scope (checked below).
+    expect(alpha.items.get.args).toBe(alpha.items.get.args);
+    void alpha.items.get.returns;
+    void alpha.items.get.error;
+    expect(args).toHaveBeenCalledTimes(1);
+    expect(returns).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledTimes(1);
+    void beta.items.get.args;
+    void beta.items.get.returns;
+    void beta.items.get.error;
+    void gamma.items.get.args;
+    void gamma.items.get.returns;
+    void gamma.items.get.error;
+    expect(args).toHaveBeenCalledTimes(1);
+    expect(returns).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledTimes(1);
+    // Binding the same contract again shares nothing with the earlier trees.
+    expect(beta.items).not.toBe(alpha.items);
+    expect(beta.items.get).not.toBe(alpha.items.get);
+    expect(gamma.items.get).not.toBe(beta.items.get);
+    expect(GenericId.scope(alpha.items.get.args.fields.id.ast)).not.toBe(
+      GenericId.scope(beta.items.get.args.fields.id.ast),
+    );
+    expect(GenericId.scope(gamma.items.get.args.fields.id.ast)).not.toBe(
+      GenericId.scope(beta.items.get.args.fields.id.ast),
+    );
+    // Every installation scopes its own IDs identically and independently.
+    const scopeOf = (installation: Parameters<typeof Component.id>[0]) =>
+      GenericId.scope(Component.id(installation, "items").ast);
+    const scopes = [scopeOf(alpha), scopeOf(beta), scopeOf(gamma)];
+    expect(new Set(scopes).size).toBe(3);
+    for (const [index, name] of ["alpha", "beta", "gamma"].entries())
+      expect(scopes[index]).toContain(name);
+    // Rebinding is deterministic: the same native reference yields the same
+    // scope, so installs can be re-bound without drifting identity.
+    expect(
+      GenericId.scope(
+        Component.id(Component.bind(lazyContract, registry.beta), "items").ast,
+      ),
+    ).toBe(scopes[1]);
+  });
 });

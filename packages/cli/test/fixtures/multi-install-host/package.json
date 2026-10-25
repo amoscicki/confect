@@ -1,0 +1,6 @@
+{
+  "name": "@confect-fixtures/multi-install-host",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module"
+}

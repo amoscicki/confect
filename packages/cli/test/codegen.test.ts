@@ -14,6 +14,7 @@ import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as DirectoryOptions from "@confect/cli/DirectoryOptions";
+import * as ConvexConfig from "@confect/cli/ConvexConfig";
 import * as TestClock from "effect/testing/TestClock";
 import * as Fiber from "effect/Fiber";
 import * as Result from "effect/Result";
@@ -351,6 +352,116 @@ layer(Layer.mergeAll(NodePath.layer, NodeFileSystem.layer))(
           ).toBe(false);
         }).pipe(Effect.scoped),
       { timeout: 30000 },
+    );
+
+    it.effect(
+      "types one registry entry per installation of the same component",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          // Scratch copies live under the package's own `node_modules/.cache`:
+          // they still resolve `@confect/*` through the workspace node_modules,
+          // but they sit outside the typechecked `test/` tree, so a run
+          // interrupted mid-test cannot leave a half-written fixture for a
+          // concurrent `tsc` to trip over. The copied layout preserves the
+          // host's relative import of the sibling component.
+          const scratchRoot = `${import.meta.dirname}/../node_modules/.cache`;
+          yield* fs.makeDirectory(scratchRoot, { recursive: true });
+          const directory = yield* fs.makeTempDirectoryScoped({
+            directory: scratchRoot,
+            prefix: "multi-install-host-",
+          });
+          const root = path.join(directory, "host");
+          const convexDirectory = path.join(root, "convex");
+          yield* Effect.forEach(
+            [
+              ["multi-install-host", "host"],
+              ["authored-component", "authored-component"],
+            ] as const,
+            ([source, target]) =>
+              fs.copy(
+                path.join(import.meta.dirname, "fixtures", source),
+                path.join(directory, target),
+                { overwrite: true },
+              ),
+            { discard: true },
+          );
+          // The host has no authored Confect source of its own; only the
+          // generated registry matters here, and git cannot carry empty
+          // directories, so the test creates it.
+          yield* fs.makeDirectory(path.join(root, "confect"), {
+            recursive: true,
+          });
+
+          // The real discovery path over the host's own `convex.config.ts`:
+          // bundling it evaluates `app.use(counter, { name })` three times, so
+          // the naming, de-duplication, ordering, and shared definition must
+          // all come out of the fixture rather than out of a hand-built list.
+          const discovered = yield* ConvexConfig.discoverInstalledComponents(
+            path.join(convexDirectory, "convex.config.ts"),
+            "convex/convex.config.ts",
+          );
+          expect(Array.map(discovered, ({ name }) => name)).toEqual([
+            "alpha",
+            "beta",
+            "gamma",
+          ]);
+          const definitionPaths = Array.dedupe(
+            Array.map(
+              discovered,
+              ({ componentDefinitionPath }) => componentDefinitionPath,
+            ),
+          );
+          expect(definitionPaths).toEqual([
+            path.join(directory, "authored-component", "convex"),
+          ]);
+
+          const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+            effect.pipe(
+              Effect.provideService(ProjectRoot, {
+                get: Effect.succeed(root),
+              }),
+              Effect.provideService(ConfectDirectory, {
+                get: Effect.succeed(path.join(root, "confect")),
+              }),
+              Effect.provideService(ConvexDirectory, {
+                get: Effect.succeed(convexDirectory),
+              }),
+            );
+          expect((yield* provide(codegenHandler)).anyWritesHappened).toBe(true);
+          const components = yield* fs.readFileString(
+            path.join(root, "confect", "_generated", "components.ts"),
+          );
+          // One shared definition, three typed installations, sorted by mount
+          // name: binding each entry requires its own `ComponentApi` mount
+          // name, not the component's default name. The import path is
+          // computed from the discovered definition directory, so the
+          // assertion does not depend on the fixture layout.
+          const typeImportPath = ConvexConfig.typeImportPath(
+            path,
+            definitionPaths[0]!,
+            path.join(root, "confect", "_generated"),
+          );
+          expect(components).toBe(
+            `import { componentsGeneric } from "convex/server";
+
+export type Components = {
+  "alpha": import("${typeImportPath}/_generated/component.js").ComponentApi<"alpha">;
+  "beta": import("${typeImportPath}/_generated/component.js").ComponentApi<"beta">;
+  "gamma": import("${typeImportPath}/_generated/component.js").ComponentApi<"gamma">;
+};
+
+export const components: Components = componentsGeneric() as any;
+`,
+          );
+          // A second pass over unchanged sources rewrites nothing, so dev mode
+          // does not churn Convex on every restart.
+          expect((yield* provide(codegenHandler)).anyWritesHappened).toBe(
+            false,
+          );
+        }).pipe(Effect.scoped),
+      { timeout: 60000 },
     );
 
     it.effect(
