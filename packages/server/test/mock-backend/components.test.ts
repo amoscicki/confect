@@ -1,18 +1,13 @@
 import type { Ref } from "@confect/core";
 import { Component } from "@confect/core";
 import {
-  DatabaseSchema,
   MutationRunner,
   QueryRunner,
   RegisteredConvexFunction,
 } from "@confect/server";
 import { expect, it } from "@effect/vitest";
 import { convexTest } from "convex-test";
-import {
-  componentsGeneric,
-  defineSchema,
-  type FunctionReference,
-} from "convex/server";
+import { componentsGeneric, type FunctionReference } from "convex/server";
 import * as Array from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -21,6 +16,12 @@ import componentSchema from "../../../cli/test/fixtures/authored-component/conve
 // Imported by relative path rather than as `@confect/test` to keep the
 // server/test workspace dependency graph acyclic, as in `mock-backend/TestConfect.ts`.
 import { TestConfect as TestConfect_ } from "../../../test/src";
+import {
+  hostConvexSchema,
+  hostModules,
+  hostSchema,
+  registerComponent,
+} from "./componentHarness";
 
 // Cross-package integration coverage for an authored component: codegen's
 // `_generated/component.ts` contract, the Convex component wire API that
@@ -53,11 +54,7 @@ const components = componentsGeneric() as unknown as {
 };
 const first = Component.bind(contract, components.first);
 const second = Component.bind(contract, components.second);
-const hostSchema = DatabaseSchema.make({});
-const hostConvexSchema = defineSchema({});
-const hostModules = { "_generated/server.ts": () => Promise.resolve({}) };
-const componentModules = {
-  "_generated/server.ts": () => Promise.resolve({}),
+const counterModules = {
   "counter.ts": () =>
     import("../../../cli/test/fixtures/authored-component/convex/counter"),
 };
@@ -67,8 +64,8 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const t = convexTest(hostConvexSchema, hostModules);
-      t.registerComponent("first", componentSchema, componentModules);
-      t.registerComponent("second", componentSchema, componentModules);
+      registerComponent(t, "first", componentSchema, counterModules);
+      registerComponent(t, "second", componentSchema, counterModules);
       const wireId = yield* Effect.promise(() =>
         t.mutation(components.first.counter.create, { count: "2" }),
       );
@@ -128,8 +125,14 @@ it.effect("registers components with TestConfect", () =>
   Effect.gen(function* () {
     const t = yield* TestConfect_.TestConfect<typeof hostSchema>();
 
-    yield* t.registerComponent("first", componentSchema, componentModules);
-    yield* t.registerComponent("second", componentSchema, componentModules);
+    yield* t.registerComponent("first", componentSchema, {
+      ...hostModules,
+      ...counterModules,
+    });
+    yield* t.registerComponent("second", componentSchema, {
+      ...hostModules,
+      ...counterModules,
+    });
 
     const firstId = yield* t.mutation(first.counter.create, { count: 2 });
     yield* t.mutation(first.counter.create, { count: 5 });
