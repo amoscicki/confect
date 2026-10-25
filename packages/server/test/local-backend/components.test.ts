@@ -114,17 +114,44 @@ layer(Layer.mergeAll(LocalBackend.layer, NodeHttpClient.layerUndici), {
     }),
   );
 
-  // HTTP mounts are covered once the component router lands (the component's
-  // routes are relative to its installation's mount prefix); this suite pins
-  // that the component boundary strips application identity.
-  it.effect("omits application auth from component contexts", () =>
-    Effect.gen(function* () {
-      const { client } = yield* LocalBackend.LocalBackend;
-      expect(
-        yield* Effect.promise(() =>
-          client.query(api.groups.components.hasAuth, {}),
-        ),
-      ).toBe(false);
-    }),
+  it.effect(
+    "mounts component HTTP routes and omits application auth from component contexts",
+    () =>
+      Effect.gen(function* () {
+        const { client } = yield* LocalBackend.LocalBackend;
+        expect(
+          yield* Effect.promise(() =>
+            client.query(api.groups.components.hasAuth, {}),
+          ),
+        ).toBe(false);
+        // `first` and `second` install the same counter component under
+        // different HTTP prefixes; `left/child` and `right/child` are the
+        // nested counter inside each `parent` installation. The component's
+        // routes are relative to each installation's prefix, which Convex
+        // includes in that installation's `CONVEX_SITE_URL`.
+        for (const mount of ["first", "second", "left/child", "right/child"]) {
+          const body = yield* HttpClient.get(
+            `http://127.0.0.1:3211/${mount}/health`,
+          ).pipe(
+            Effect.flatMap(HttpClientResponse.filterStatusOk),
+            Effect.flatMap((response) => response.text),
+          );
+          expect(body).toBe("component-ready");
+          const echo = yield* HttpClient.post(
+            `http://127.0.0.1:3211/${mount}/echo`,
+            {
+              body: HttpBody.text(`body for ${mount}`),
+            },
+          ).pipe(
+            Effect.flatMap(HttpClientResponse.filterStatusOk),
+            Effect.flatMap((response) => response.text),
+          );
+          expect(echo).toBe(`body for ${mount}`);
+          const missing = yield* HttpClient.get(
+            `http://127.0.0.1:3211/${mount}/missing`,
+          );
+          expect(missing.status).toBe(404);
+        }
+      }),
   );
 });

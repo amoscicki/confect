@@ -11,6 +11,7 @@ import {
   DatabaseSchema,
   DatabaseWriter,
   FunctionImpl,
+  HttpRouter,
   MutationCtx,
   QueryCtx,
   RegisteredConvexFunction,
@@ -36,6 +37,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Router from "effect/http/HttpRouter";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import { vi } from "vitest";
 
 const scope = IdScope.component("@example/counter");
@@ -247,6 +250,29 @@ describe("component capabilities", () => {
       }).pipe(Effect.scoped);
     },
   );
+
+  it("derives HTTP handler capabilities from the same schema", () => {
+    const withAuth = Router.add(
+      "GET",
+      "/",
+      Auth.Auth.pipe(Effect.as(HttpServerResponse.text("OK"))),
+    );
+    // @ts-expect-error Component HTTP handlers also cannot require application Auth.
+    HttpRouter.forSchema(databaseSchema)(withAuth);
+    HttpRouter.forSchema(databaseSchema)(
+      Router.add("GET", "/", HttpServerResponse.text("OK")),
+    );
+    const withAppStorage = Router.add(
+      "GET",
+      "/",
+      Effect.gen(function* () {
+        yield* StorageReader.StorageReader;
+        return HttpServerResponse.text("OK");
+      }),
+    );
+    // @ts-expect-error Component HTTP handlers read scoped, not application, storage.
+    HttpRouter.forSchema(databaseSchema)(withAppStorage);
+  });
 
   it.effect(
     "omits authentication from the runtime layer and raw context",
