@@ -70,6 +70,20 @@ export type TestConfectWithoutIdentity<
 };
 
 export type TestConfect<ConfectSchema extends DatabaseSchema.AnyWithProps> = {
+  /**
+   * Register an installed component so the host's functions can call it, or so
+   * it can be addressed directly through a bound component contract.
+   *
+   * `componentPath` must match the path the component is installed at. Each
+   * call replaces any registration at the same path with a fresh database, so
+   * documents written to that installation are lost; register the same
+   * definition at distinct paths to test installation isolation.
+   */
+  registerComponent: (
+    componentPath: string,
+    schema: SchemaDefinition<GenericSchema, boolean>,
+    modules: Record<string, () => Promise<any>>,
+  ) => Effect.Effect<void>;
   withIdentity: (
     userIdentity: Partial<UserIdentity>,
   ) => TestConfectWithoutIdentity<ConfectSchema>;
@@ -215,6 +229,14 @@ class TestConfectImpl<
       this.testConvex.withIdentity(userIdentity),
     );
 
+  readonly registerComponent: TestConfect<ConfectSchema>["registerComponent"] =
+    Effect.fn("TestConfect.registerComponent")(
+      (componentPath, schema, modules) =>
+        Effect.sync(() =>
+          this.testConvex.registerComponent(componentPath, schema, modules),
+        ),
+    );
+
   readonly query = <QueryRef extends Ref.AnyQuery>(
     queryRef: QueryRef,
     ...args: Ref.OptionalArgs<QueryRef>
@@ -253,16 +275,58 @@ class TestConfectImpl<
     );
 }
 
+const makeLayer = <DatabaseSchema_ extends DatabaseSchema.AnyWithProps>(
+  databaseSchema: DatabaseSchema_,
+  makeInstance: () => TestConvexForDataModelAndIdentity<
+    DataModel.ToConvex<DataModel.FromSchema<DatabaseSchema_>>
+  >,
+): Layer.Layer<TestConfect<DatabaseSchema_>> =>
+  Layer.sync(
+    TestConfect<DatabaseSchema_>(),
+    () => new TestConfectImpl(databaseSchema, makeInstance()),
+  );
+
+/**
+ * Build a `TestConfect` layer for a caller-supplied `convexTest` instance.
+ *
+ * Use this when the test needs to prepare the instance before Confect sees it,
+ * e.g. to call a component package's own `register(t)` helper (which calls
+ * `t.registerComponent`) so its components are installed.
+ *
+ * The supplied instance—its database and every component registered on it—is
+ * shared and never reset: constructing the layer again wraps the same instance,
+ * so state written through one layer is visible through the next. Build the
+ * instance once per `describe` block and provide the layer per test; use
+ * {@link layer} when each test needs its own database.
+ *
+ * @remarks
+ *   The pairing between `databaseSchema` and `instance` is only partly checked
+ *   by the type system: an instance built from a different, non-assignable
+ *   deployment schema is rejected, but an instance type widened to an empty or
+ *   structurally compatible schema is accepted. `databaseSchema` must therefore
+ *   describe the deployment schema the instance was constructed from, or
+ *   results are decoded against the wrong schema.
+ */
+export const layerFromInstance = <
+  DatabaseSchema_ extends DatabaseSchema.AnyWithProps,
+>(
+  databaseSchema: DatabaseSchema_,
+  instance: TestConvexForDataModelAndIdentity<
+    DataModel.ToConvex<DataModel.FromSchema<DatabaseSchema_>>
+  >,
+): Layer.Layer<TestConfect<DatabaseSchema_>> =>
+  makeLayer(databaseSchema, () => instance);
+
+/**
+ * Build a `TestConfect` layer around a fresh `convexTest` instance created from
+ * the given deployment schema and function modules.
+ */
 export const layer = <DatabaseSchema_ extends DatabaseSchema.AnyWithProps>(
   databaseSchema: DatabaseSchema_,
   convexSchemaDefinition: SchemaDefinition<GenericSchema, true>,
   modules: Record<string, () => Promise<any>>,
 ): Layer.Layer<TestConfect<DatabaseSchema_>> =>
-  Layer.sync(
-    TestConfect<DatabaseSchema_>(),
-    () =>
-      new TestConfectImpl(
-        databaseSchema,
-        convexTest(convexSchemaDefinition, modules) as any,
-      ),
+  makeLayer(
+    databaseSchema,
+    () => convexTest(convexSchemaDefinition, modules) as any,
   );

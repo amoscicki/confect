@@ -18,6 +18,9 @@ import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import contract from "../../../cli/test/fixtures/authored-component/confect/_generated/component";
 import componentSchema from "../../../cli/test/fixtures/authored-component/convex/schema";
+// Imported by relative path rather than as `@confect/test` to keep the
+// server/test workspace dependency graph acyclic, as in `mock-backend/TestConfect.ts`.
+import { TestConfect as TestConfect_ } from "../../../test/src";
 
 // Cross-package integration coverage for an authored component: codegen's
 // `_generated/component.ts` contract, the Convex component wire API that
@@ -119,4 +122,49 @@ it.effect(
       void [own, wrong];
     }),
   { timeout: 30_000 },
+);
+
+it.effect("registers components with TestConfect", () =>
+  Effect.gen(function* () {
+    const t = yield* TestConfect_.TestConfect<typeof hostSchema>();
+
+    yield* t.registerComponent("first", componentSchema, componentModules);
+    yield* t.registerComponent("second", componentSchema, componentModules);
+
+    const firstId = yield* t.mutation(first.counter.create, { count: 2 });
+    yield* t.mutation(first.counter.create, { count: 5 });
+    const secondId = yield* t.mutation(second.counter.create, { count: 11 });
+
+    // Each installation has its own database: rows written through one are
+    // invisible to the other.
+    expect(
+      Array.map(yield* t.query(first.counter.list), (row) => row.count),
+    ).toEqual([2, 5]);
+    expect(
+      Array.map(yield* t.query(second.counter.list), (row) => row.count),
+    ).toEqual([11]);
+
+    // A component's declared error is decoded with its tag, and catching it
+    // must not commit the failed subtransaction's insert.
+    const failure = yield* Effect.result(t.mutation(first.counter.reject));
+    expect(Result.isFailure(failure)).toBe(true);
+    if (Result.isFailure(failure))
+      expect(failure.failure).toMatchObject({
+        _tag: "Rejected",
+        id: expect.any(String),
+      });
+    expect(
+      Array.map(yield* t.query(first.counter.list), (row) => row.count),
+    ).toEqual([2, 5]);
+
+    const ownFirst: Ref.Returns<typeof first.counter.create> = firstId;
+    const ownSecond: Ref.Returns<typeof second.counter.create> = secondId;
+    // @ts-expect-error Component installations have different ID types.
+    const wrong: Ref.Returns<typeof first.counter.create> = secondId;
+    void [ownFirst, ownSecond, wrong];
+  }).pipe(
+    Effect.provide(
+      TestConfect_.layer(hostSchema, hostConvexSchema, hostModules),
+    ),
+  ),
 );
