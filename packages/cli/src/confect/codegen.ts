@@ -9,6 +9,8 @@ import * as HashMap from "effect/HashMap";
 import * as Match from "effect/Match";
 import * as Option from "effect/Option";
 import * as Record from "effect/Record";
+import * as Ref from "effect/Ref";
+import * as DirectoryOptions from "../DirectoryOptions";
 import * as EvaluationSession from "../EvaluationSession";
 import * as Bundler from "../Bundler";
 import * as CompiledModule from "../CompiledModule";
@@ -51,6 +53,7 @@ import {
   removePathIfExists,
   toModuleImportPath,
   touchConvexSchema,
+  WriteTracker,
   writeFileStringAndLog,
 } from "../utils";
 
@@ -93,15 +96,18 @@ const LEGACY_PATHS = Effect.gen(function* () {
   ];
 });
 
-export const codegen = Command.make("codegen", {}, () =>
-  Effect.gen(function* () {
-    yield* logPending("Performing initial sync…");
-    yield* codegenHandler.pipe(
-      Effect.asVoid,
-      Effect.tap(() => logSuccess("Generated files are up-to-date")),
-      CodegenError.tapAndLog,
-    );
-  }),
+export const codegen = Command.make(
+  "codegen",
+  DirectoryOptions.flags,
+  (input) =>
+    Effect.gen(function* () {
+      yield* logPending("Performing initial sync…");
+      yield* codegenHandler.pipe(
+        Effect.asVoid,
+        Effect.tap(() => logSuccess("Generated files are up-to-date")),
+        CodegenError.tapAndLog,
+      );
+    }).pipe(DirectoryOptions.provide(input)),
 ).pipe(
   Command.withDescription(
     "Generate `confect/_generated` files and the contents of the `convex` directory (except `convex.config.ts` and `tsconfig.json`)",
@@ -109,6 +115,7 @@ export const codegen = Command.make("codegen", {}, () =>
 );
 
 const runCodegen = Effect.gen(function* () {
+  yield* validateComponentConfiguration;
   yield* rejectLegacySchemaFile;
   const tableModules = yield* TableModule.discover;
   yield* validateNoDocNameCollisions(tableModules);
@@ -134,6 +141,10 @@ const runCodegen = Effect.gen(function* () {
   yield* generateConfectGeneratedDirectory;
   yield* warnIfNoTables(tableModules);
   yield* generateIdConstructor(tableModules);
+  // Tables and specs may import bound component IDs and schemas, so the
+  // registry has to exist before any of them is bundled—including on a
+  // project's first codegen run.
+  yield* generateComponents;
   yield* generateTableWrappers(tableModules);
   yield* removeObsoleteTableWrappers(tableModules);
   yield* generateRuntimeSchema(tableModules);
@@ -151,9 +162,7 @@ const runCodegen = Effect.gen(function* () {
       generateDocs(tableModules),
       generateServices,
       generateConvexSchema(tableModules),
-      // Must land before impl validation: impls may import the generated
-      // components registry, so it has to exist when their bundles are built.
-      generateComponents,
+      generateComponentContract(tableModules),
     ],
     { concurrency: "unbounded" },
   );
@@ -187,16 +196,57 @@ const runCodegen = Effect.gen(function* () {
   };
 });
 
+/**
+ * Whether the target is a component. `Match.exhaustive` makes a new target kind
+ * a compile error rather than silently generating the application's outputs.
+ */
+const isComponentTarget = Effect.map(ConvexDirectory.target, (target) =>
+  Match.value(target.kind).pipe(
+    Match.when("app", () => false),
+    Match.when("component", () => true),
+    Match.exhaustive,
+  ),
+);
+
+/**
+ * A component cannot configure application authentication: the component
+ * boundary strips identity, so a stray `confect/auth.ts` would silently do
+ * nothing (or, worse, import application-only modules). Fail with a clear
+ * message instead.
+ */
+const validateComponentConfiguration = Effect.gen(function* () {
+  if (!(yield* isComponentTarget)) return;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const confectDirectory = yield* ConfectDirectory.get;
+  const authPath = path.join(confectDirectory, "auth.ts");
+  if (yield* fs.exists(authPath)) {
+    return yield* new CodegenError.ComponentAuthNotSupportedError({
+      authPath,
+    });
+  }
+});
+
 export const generateWithSnapshot = runCodegen.pipe(
   EvaluationSession.provide,
   Effect.withSpan("Cli.codegen"),
 );
 
-export const codegenHandler = generateWithSnapshot.pipe(
-  Effect.tap(() => touchConvexSchema),
-  Effect.map(({ functionPaths }) => ({ functionPaths })),
-  Effect.provide(CompilationSession.layer("Once")),
-);
+/**
+ * Run codegen. A fresh {@link WriteTracker} per run reports whether anything on
+ * disk actually changed, so callers (and tests asserting idempotence) can tell
+ * a no-op pass from a rewriting one.
+ */
+export const codegenHandler = Effect.gen(function* () {
+  const tracker = yield* Ref.make(false);
+  const { functionPaths } = yield* generateWithSnapshot.pipe(
+    Effect.provideService(WriteTracker, tracker),
+    Effect.tap(() => touchConvexSchema),
+    Effect.provide(CompilationSession.layer("Once")),
+  );
+  const anyWritesHappened = yield* Ref.get(tracker);
+  return { functionPaths, anyWritesHappened };
+});
 
 export const compileOptionalModules = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -262,6 +312,27 @@ export const updateDeclarations = Effect.fn("Cli.updateDeclarations")(
   },
   EvaluationSession.provide,
 );
+
+/**
+ * Emit `confect/_generated/component.ts` for a component target: the
+ * publishable contract applications bind with `Component.bind`. Applications do
+ * not get one—their public surface is `_generated/spec.ts` and the Convex
+ * generated API.
+ */
+const generateComponentContract = Effect.fnUntraced(function* (
+  tableModules: ReadonlyArray<TableModule.TableModule>,
+) {
+  if (!(yield* isComponentTarget)) return;
+  const path = yield* Path.Path;
+  const confectDirectory = yield* ConfectDirectory.get;
+  const contents = yield* templates.componentContract({
+    tableNames: Array.map(tableModules, (table) => table.tableName),
+  });
+  yield* writeFileStringAndLog(
+    path.join(confectDirectory, "_generated", "component.ts"),
+    contents,
+  );
+});
 
 const generateConfectGeneratedDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -543,7 +614,15 @@ const generateIdConstructor = Effect.fnUntraced(function* (
     tableModules,
     (tableModule) => tableModule.tableName,
   );
-  const contents = yield* templates.id({ tableNames });
+  const contents = yield* Match.value(yield* ConvexDirectory.target).pipe(
+    Match.when({ kind: "app" }, () => templates.id({ tableNames })),
+    // A component's IDs carry its definition scope, so they stay distinct
+    // from the application's and from other components' IDs.
+    Match.when({ kind: "component" }, ({ scope }) =>
+      templates.id({ tableNames, scope }),
+    ),
+    Match.exhaustive,
+  );
 
   yield* writeFileStringAndLog(idPath, contents);
 });
@@ -579,6 +658,7 @@ const generateTableWrappers = Effect.fnUntraced(function* (
       const contents = yield* templates.tableWrapper({
         tableName: tableModule.tableName,
         unnamedImportPath,
+        component: yield* isComponentTarget,
       });
       yield* writeFileStringAndLog(wrapperPath, contents);
     }),
@@ -634,7 +714,10 @@ const generateRuntimeSchema = Effect.fnUntraced(function* (
   const schemaPath = path.join(confectDirectory, generatedSchemaPath);
 
   const bindings = yield* tableModuleBindings(tableModules, schemaPath);
-  const contents = yield* templates.runtimeSchema({ tableModules: bindings });
+  const contents = yield* templates.runtimeSchema({
+    tableModules: bindings,
+    component: yield* isComponentTarget,
+  });
 
   yield* writeFileStringAndLog(schemaPath, contents);
 });
@@ -696,6 +779,7 @@ const generateServices = Effect.gen(function* () {
 
   const servicesContentsString = yield* templates.services({
     schemaImportPath,
+    component: yield* isComponentTarget,
   });
 
   yield* writeFileStringAndLog(servicesPath, servicesContentsString);
@@ -779,7 +863,8 @@ const generateRefs = Effect.gen(function* () {
  * components installed in `convex/convex.config.ts` (see
  * {@link templates.components}). The file is emitted even when there is no
  * `convex.config.ts` (as an empty registry) so the import surface stays stable.
- * It must exist before impl validation because impl modules may import it.
+ * It must exist before any table, spec, or impl module is bundled: those may
+ * import bound component IDs and schemas from it, including on a first run.
  */
 export const generateComponents = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -804,6 +889,7 @@ export const generateComponents = Effect.gen(function* () {
     ? yield* EvaluationSession.components(
         convexConfigPath,
         path.relative(projectRoot, convexConfigPath),
+        (yield* ConvexDirectory.target).kind,
       )
     : [];
 

@@ -310,6 +310,7 @@ export const validateTables = Effect.fn("EvaluationSession.validateTables")(
 export const components = Effect.fn("EvaluationSession.components")(function* (
   absolutePath: string,
   displayPath: string,
+  kind: ConvexConfig.TargetKind,
 ) {
   const path = yield* Path.Path;
   const { client, requestContext } = yield* ModuleEvaluation;
@@ -318,7 +319,7 @@ export const components = Effect.fn("EvaluationSession.components")(function* (
     plugins: [ConvexConfig.componentConfigPlugin(path)],
   }).pipe(Effect.mapError((error) => fromBundlerError(displayPath, error)));
   return yield* client
-    .Components({ ...requestContext, displayPath, url: artifact.url })
+    .Components({ ...requestContext, displayPath, kind, url: artifact.url })
     .pipe(
       Effect.ensuring(logCoalescedBuildWarnings(artifact.warnings)),
       Effect.ensuring(CompiledModule.consume(artifact)),

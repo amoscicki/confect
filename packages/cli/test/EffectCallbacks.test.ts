@@ -3,13 +3,24 @@ import type * as DevSupervisor from "@confect/cli/DevSupervisor";
 import type * as CompilationInputs from "@confect/cli/CompilationInputs";
 import type { ConfigError } from "effect/Config";
 import type * as CodegenError from "@confect/cli/CodegenError";
-import type { ConfectDirectory } from "@confect/cli/ConfectDirectory";
-import type { ConvexDirectory } from "@confect/cli/ConvexDirectory";
+import type * as DirectoryOptions from "@confect/cli/DirectoryOptions";
+import type {
+  ConfectDirectory,
+  ConfectDirectoryNotFoundError,
+} from "@confect/cli/ConfectDirectory";
+import type {
+  ConvexDirectory,
+  ConvexDirectoryNotFoundError,
+  InvalidConvexJsonError,
+} from "@confect/cli/ConvexDirectory";
 import type { EvaluationError } from "@confect/cli/Evaluation";
 import type * as FunctionPaths from "@confect/cli/FunctionPaths";
 import type * as GroupPath from "@confect/cli/GroupPath";
 import type * as GenerationSnapshot from "@confect/cli/GenerationSnapshot";
-import type { ProjectRoot } from "@confect/cli/ProjectRoot";
+import type {
+  ProjectRoot,
+  ProjectRootNotFoundError,
+} from "@confect/cli/ProjectRoot";
 import * as TableModule from "@confect/cli/TableModule";
 import { codegenHandler } from "@confect/cli/confect/codegen";
 import { dev, type SyncJobError } from "@confect/cli/confect/dev";
@@ -20,6 +31,7 @@ import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import type { PlatformError } from "effect/PlatformError";
+import type * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import type * as Command from "effect/cli/Command";
@@ -67,6 +79,7 @@ it("preserves actual workflow inputs and inferred result, error, and service typ
     Effect.Effect<
       {
         functionPaths: FunctionPaths.FunctionPaths;
+        anyWritesHappened: boolean;
       },
       | CodegenError.CodegenError
       | BundlerError
@@ -80,18 +93,24 @@ it("preserves actual workflow inputs and inferred result, error, and service typ
   expectTypeOf(dev).toEqualTypeOf<
     Command.Command<
       "dev",
-      {},
+      { readonly componentDir: Option.Option<string> },
       {},
       | BundlerError
       | ConfigError
+      | ConfectDirectoryNotFoundError
+      | ConvexDirectoryNotFoundError
+      | DirectoryOptions.ComponentDefinitionNotFoundError
       | EvaluationError
+      | InvalidConvexJsonError
       | PlatformError
       | DevSupervisor.MissingSessionIpc
       | DevSupervisor.RestartRequested
       | DevSupervisor.SessionExited
       | DevSupervisor.SupervisorError
-      | SyncJobError,
-      GenerationServices | ProjectRoot
+      | SyncJobError
+      | ProjectRootNotFoundError
+      | Schema.SchemaError,
+      FileServices
     >
   >();
 });

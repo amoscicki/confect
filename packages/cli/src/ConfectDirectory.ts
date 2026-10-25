@@ -38,7 +38,11 @@ export const findConfectDirectory = Effect.gen(function* () {
   }
 });
 
-export const layer = Layer.effect(
+/**
+ * Build the service from an already-provided {@link ConvexDirectory}, so
+ * component codegen can point both services at the component's directories.
+ */
+export const layerFromConvexDirectory = Layer.effect(
   ConfectDirectory,
   Effect.gen(function* () {
     const confectDirectory = yield* findConfectDirectory;
@@ -47,4 +51,8 @@ export const layer = Layer.effect(
 
     return { get: Ref.get(ref) } as const;
   }),
-).pipe(Layer.provide(ConvexDirectory.layer));
+);
+
+export const layer = layerFromConvexDirectory.pipe(
+  Layer.provide(ConvexDirectory.layer),
+);

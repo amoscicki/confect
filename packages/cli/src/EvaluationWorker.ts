@@ -143,6 +143,7 @@ const handlers = requests.toLayer(
             return yield* ConvexConfig.parseInstalledComponents(
               module.default,
               request.displayPath,
+              request.kind,
             );
           }),
         ),

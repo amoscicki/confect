@@ -156,6 +156,18 @@ export class InvalidConvexConfigError extends Schema.TaggedError<InvalidConvexCo
   },
 ) {}
 
+/**
+ * A component's `confect/auth.ts` cannot configure application authentication:
+ * the component boundary strips identity, so the configuration would silently
+ * do nothing (or, worse, import application-only modules).
+ */
+export class ComponentAuthNotSupportedError extends Schema.TaggedError<ComponentAuthNotSupportedError>()(
+  "ComponentAuthNotSupportedError",
+  {
+    authPath: Schema.String,
+  },
+) {}
+
 export const CodegenError = Schema.Union([
   SnapshotError,
   BuildError,
@@ -176,6 +188,7 @@ export const CodegenError = Schema.Union([
   LegacySchemaFileError,
   ConflictingDocNameError,
   InvalidConvexConfigError,
+  ComponentAuthNotSupportedError,
 ]);
 export type CodegenError = typeof CodegenError.Type;
 
@@ -346,6 +359,15 @@ const renderInvalidConvexConfigError = (
     ` could not be evaluated: ${error.reason}`,
   );
 
+const renderComponentAuthNotSupportedError = (
+  error: ComponentAuthNotSupportedError,
+): string =>
+  singleLine(
+    "Component ",
+    formatPath(error.authPath),
+    " configures application authentication, which a component cannot do: the component boundary strips identity, so the configuration would silently do nothing. Delete the file and pass identity explicitly through function arguments.",
+  );
+
 const renderLegacySchemaFileError = (error: LegacySchemaFileError): string =>
   singleLine(
     "Found a legacy ",
@@ -415,6 +437,10 @@ export const renderCodegenError = (error: CodegenError): string => {
     Match.tag("LegacySchemaFileError", renderLegacySchemaFileError),
     Match.tag("ConflictingDocNameError", renderConflictingDocNameError),
     Match.tag("InvalidConvexConfigError", renderInvalidConvexConfigError),
+    Match.tag(
+      "ComponentAuthNotSupportedError",
+      renderComponentAuthNotSupportedError,
+    ),
     Match.exhaustive,
   );
 };

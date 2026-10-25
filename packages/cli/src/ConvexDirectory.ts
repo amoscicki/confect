@@ -1,3 +1,5 @@
+import * as IdScope from "@confect/core/IdScope";
+import type * as DatabaseSchema from "@confect/server/DatabaseSchema";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -9,11 +11,28 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as ProjectRoot from "./ProjectRoot";
 
+/**
+ * Where codegen's outputs will run: the application (the default) or an
+ * isolated component. A component's `target` carries the ID scope every
+ * generated table, ID, and handler belongs to.
+ */
+export type Target =
+  | DatabaseSchema.AppTarget
+  | DatabaseSchema.ComponentTarget<IdScope.Component<string>>;
+
 export class ConvexDirectory extends Context.Service<
   ConvexDirectory,
-  { readonly get: Effect.Effect<string> }
+  {
+    readonly get: Effect.Effect<string>;
+    readonly target?: Target | undefined;
+  }
 >()("@confect/cli/ConvexDirectory") {
   static readonly get = ConvexDirectory.use((service) => service.get);
+  static readonly target = ConvexDirectory.use((service) =>
+    Effect.succeed<Target>(
+      service.target ?? { kind: "app", scope: IdScope.app },
+    ),
+  );
 }
 
 export class ConvexDirectoryNotFoundError extends Schema.TaggedError<ConvexDirectoryNotFoundError>()(

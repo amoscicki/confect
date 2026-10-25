@@ -12,7 +12,7 @@ import { CodeBlockWriter } from "./CodeBlockWriter";
 import { logFileAdded, logFileModified, logFileRemoved } from "./log";
 import { ConfectDirectory } from "./ConfectDirectory";
 import { ConvexDirectory } from "./ConvexDirectory";
-import { removePathIfExists, toModuleImportPath } from "./utils";
+import { markWritten, removePathIfExists, toModuleImportPath } from "./utils";
 
 export const render = ({
   functionNames,
@@ -92,11 +92,13 @@ const generateGroupModuleEffect = Effect.fnUntraced(function* ({
 
   if (!(yield* fs.exists(modulePath))) {
     yield* fs.writeFileString(modulePath, functionsContentsString);
+    yield* markWritten;
     return "Added" as const;
   }
   const existing = yield* fs.readFileString(modulePath);
   if (existing !== functionsContentsString) {
     yield* fs.writeFileString(modulePath, functionsContentsString);
+    yield* markWritten;
     return "Modified" as const;
   }
   return "Unchanged" as const;

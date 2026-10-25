@@ -1,3 +1,4 @@
+import * as Context from "effect/Context";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type { PlatformError } from "effect/PlatformError";
@@ -6,11 +7,29 @@ import * as Array from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as String from "effect/String";
 import { logFileAdded, logFileModified } from "./log";
 import { ConfectDirectory } from "./ConfectDirectory";
 import { ConvexDirectory } from "./ConvexDirectory";
 import * as templates from "./templates";
+
+/**
+ * Tracks whether the current codegen run wrote anything to disk. Set to `true`
+ * by every helper that actually overwrites a file (skipping the
+ * content-unchanged case). `codegenHandler` provides a fresh `Ref` per run and
+ * reads it back to report `anyWritesHappened`; callers outside a codegen pass
+ * hit the cached default `Ref` and need not interact with the tracker.
+ */
+export const WriteTracker = Context.Reference<Ref.Ref<boolean>>(
+  "@confect/cli/WriteTracker",
+  { defaultValue: () => Ref.makeUnsafe(false) },
+);
+
+export const markWritten = Effect.gen(function* () {
+  const tracker = yield* WriteTracker;
+  yield* Ref.set(tracker, true);
+});
 
 export const removePathExtension = Effect.fnUntraced(function* (
   pathStr: string,
@@ -45,12 +64,14 @@ export const writeFileStringAndLog = Effect.fnUntraced(function* (
   const fs = yield* FileSystem.FileSystem;
   if (!(yield* fs.exists(filePath))) {
     yield* fs.writeFileString(filePath, contents);
+    yield* markWritten;
     yield* logFileAdded(filePath);
     return;
   }
   const existing = yield* fs.readFileString(filePath);
   if (existing !== contents) {
     yield* fs.writeFileString(filePath, contents);
+    yield* markWritten;
     yield* logFileModified(filePath);
   }
 });
@@ -85,11 +106,13 @@ export const writeFileString = Effect.fnUntraced(function* (
 
   if (!(yield* fs.exists(filePath))) {
     yield* fs.writeFileString(filePath, contents);
+    yield* markWritten;
     return "Added";
   }
   const existing = yield* fs.readFileString(filePath);
   if (existing !== contents) {
     yield* fs.writeFileString(filePath, contents);
+    yield* markWritten;
     return "Modified";
   }
   return "Unchanged";

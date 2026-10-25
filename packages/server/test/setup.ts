@@ -52,13 +52,22 @@ const confectCliEntryUrl = new URL(
  * be the cwd while its codegen runs. We chdir for the duration of the codegen
  * call and restore the original cwd via `ensuring`.
  *
+ * `componentDirs` are component definition directories (relative to the
+ * fixture) that must be generated before the application: the app's generated
+ * `components.ts` imports each component's generated `ComponentApi`.
+ *
  * Codegen runs both locally and on CI. The fixtures' generated outputs
  * (`confect/_generated/` and the wrapper files under `convex/`) are committed
  * to the repo, and CI verifies (via the `verify-codegen-committed` action) that
  * codegen produces no changes—i.e. that the committed outputs are up-to-date.
  */
 export const setupForFixture =
-  (baseDir: string, fixtureSubpath: string) => () =>
+  (
+    baseDir: string,
+    fixtureSubpath: string,
+    componentDirs: ReadonlyArray<string> = [],
+  ) =>
+  () =>
     pipe(
       Effect.gen(function* () {
         const path = yield* Path.Path;
@@ -68,6 +77,14 @@ export const setupForFixture =
 
         yield* Effect.gen(function* () {
           process.chdir(fixtureDir);
+          for (const componentDir of componentDirs) {
+            yield* runCommand(process.execPath, [
+              cliEntry,
+              "codegen",
+              "--component-dir",
+              componentDir,
+            ]);
+          }
           yield* runCommand(process.execPath, [cliEntry, "codegen"]);
         }).pipe(Effect.ensuring(Effect.sync(() => process.chdir(originalCwd))));
       }),

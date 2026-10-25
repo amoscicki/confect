@@ -73,6 +73,7 @@ export const requests = RpcGroup.make(
     payload: Schema.Struct({
       ...RequestContext.fields,
       displayPath: Schema.String,
+      kind: Schema.Literals(["app", "component"]),
       url: Schema.String,
     }),
     success: Schema.Array(

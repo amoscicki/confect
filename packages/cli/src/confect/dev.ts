@@ -32,6 +32,7 @@ import * as DevSupervisor from "../DevSupervisor";
 import * as EntryPoint from "../EntryPoint";
 import * as SpecModulePath from "../SpecModulePath";
 import { ConfectDirectory } from "../ConfectDirectory";
+import * as DirectoryOptions from "../DirectoryOptions";
 import { compileOptionalModules } from "./codegen";
 import * as Evaluation from "../Evaluation";
 import { ConvexDirectory } from "../ConvexDirectory";
@@ -169,7 +170,7 @@ const runSession = Effect.gen(function* () {
   );
 });
 
-export const dev = Command.make("dev", {}, () =>
+export const dev = Command.make("dev", DirectoryOptions.flags, (input) =>
   DevSupervisor.run(
     runSession.pipe(
       Effect.provide(CompilationSession.layer("Watch")),
@@ -181,7 +182,7 @@ export const dev = Command.make("dev", {}, () =>
             : Effect.fail(error),
       }),
     ),
-  ),
+  ).pipe(DirectoryOptions.provide(input)),
 ).pipe(Command.withDescription("Start the Confect development server"));
 
 const esbuildMessageKey = (m: esbuild.Message): string =>
@@ -333,6 +334,15 @@ const syncLoop = Effect.fnUntraced(function* (
           ),
         );
       } else if (change.file === path.join(convex, "convex.config.ts")) {
+        yield* Ref.update(pendingRef, SyncState.full);
+      } else if (
+        change.file === path.join(confect, "auth.ts") &&
+        (yield* ConvexDirectory.target).kind === "component"
+      ) {
+        // A component must not configure application authentication, but the
+        // generated `services.ts` and contract depend on whether it does, and
+        // codegen reports the tagged error. Re-run the whole pipeline rather
+        // than only regenerating `convex/auth.config.ts`.
         yield* Ref.update(pendingRef, SyncState.full);
       }
     });
