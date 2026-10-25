@@ -1,5 +1,6 @@
 import type { FunctionSpec, RuntimeAndFunctionType } from "@confect/core";
 import type * as FunctionProvenance from "@confect/core/FunctionProvenance";
+import * as IdScope from "@confect/core/IdScope";
 import * as MiddlewareSpec from "@confect/core/MiddlewareSpec";
 import {
   compileArgsSchema,
@@ -37,9 +38,9 @@ import type * as ResolvedMiddleware from "./ResolvedMiddleware";
 import * as Scheduler from "./Scheduler";
 import * as Storage from "./Storage";
 import * as StorageActionWriter from "./StorageActionWriter";
-import type * as StorageReader from "./StorageReader";
 import * as StorageWriter from "./StorageWriter";
 import * as VectorSearch from "./VectorSearch";
+import type * as Handler from "./Handler";
 
 export type Any =
   | RegisteredQuery<FunctionVisibility, DefaultFunctionArgs, any>
@@ -270,6 +271,7 @@ export const actionFunctionBase = <
   handler,
   resolvedMiddlewares = [],
   createLayer,
+  scope = IdScope.app,
 }: {
   name: string;
   functionVisibility: FunctionVisibility;
@@ -281,9 +283,10 @@ export const actionFunctionBase = <
   createLayer: (
     ctx: GenericActionCtx<DataModel.ToConvex<DataModel.FromSchema<Schema>>>,
   ) => Layer.Layer<R>;
+  scope?: IdScope.IdScope;
 }) => ({
-  args: compileArgsSchema(args),
-  returns: compileReturnsSchema(returns),
+  args: compileArgsSchema(args, scope),
+  returns: compileReturnsSchema(returns, scope),
   handler: (
     ctx: GenericActionCtx<DataModel.ToConvex<DataModel.FromSchema<Schema>>>,
     actualArgs: ConvexArgs,
@@ -315,44 +318,43 @@ export const actionFunctionBase = <
 
 export type ActionServices<
   DatabaseSchema_ extends DatabaseSchema.AnyWithProps,
-> =
-  | Scheduler.Scheduler
-  | Auth.Auth
-  | ExecutionMetadata.ExecutionMetadata
-  | RequestMetadata.RequestMetadata
-  | Storage.Storage
-  | StorageReader.StorageReader
-  | StorageWriter.StorageWriter
-  | StorageActionWriter.StorageActionWriter
-  | QueryRunner.QueryRunner
-  | MutationRunner.MutationRunner
-  | ActionRunner.ActionRunner
-  | VectorSearch.VectorSearch<DataModel.FromSchema<DatabaseSchema_>>
-  | ActionCtx.ActionCtx<
-      DataModel.ToConvex<DataModel.FromSchema<DatabaseSchema_>>
-    >;
+> = Handler.ActionServices<DatabaseSchema_>;
 
 /**
- * The ctx-backed action services that don't depend on a Confect database
- * schema. {@link actionLayer} adds the schema-typed `VectorSearch` on top; the
- * HTTP API handler uses this base directly.
+ * The ctx-backed services every action handler receives. Shared by the
+ * application/HTTP path ({@link baseActionLayer}) and the schema path ({@link
+ * actionLayer}) so the two cannot drift; only `Auth` (whose availability
+ * depends on the target) and `VectorSearch` (schema-typed) are added by the
+ * callers.
  */
-export const baseActionLayer = <ConvexDataModel extends GenericDataModel>(
+const actionContextLayer = <
+  ConvexDataModel extends GenericDataModel,
+  Scope extends IdScope.IdScope,
+>(
   ctx: GenericActionCtx<ConvexDataModel>,
+  scope: Scope,
 ) =>
   Layer.mergeAll(
-    Scheduler.layer(ctx.scheduler),
-    Auth.layer(ctx.auth),
     ExecutionMetadata.layer(ctx.meta),
     RequestMetadata.layer(ctx.meta),
-    Storage.layer(ctx.storage),
-    StorageWriter.StorageWriter.layer(ctx.storage),
-    StorageActionWriter.StorageActionWriter.layer(ctx.storage),
+    Scheduler.layer<Scope>(ctx.scheduler, scope),
+    Storage.layer<Scope>(ctx.storage, scope),
+    StorageWriter.StorageWriter.layer<Scope>(ctx.storage, scope),
+    StorageActionWriter.StorageActionWriter.layer<Scope>(ctx.storage, scope),
     QueryRunner.layer(ctx.runQuery.bind(ctx)),
     MutationRunner.layer(ctx.runMutation.bind(ctx)),
     ActionRunner.layer(ctx.runAction.bind(ctx)),
-    Layer.succeed(ActionCtx.ActionCtx<ConvexDataModel>(), ctx),
+    ActionCtx.layer<ConvexDataModel, Scope>(ctx, scope),
   );
+
+/**
+ * The ctx-backed action services that don't depend on a Confect database
+ * schema, at the application's ID scope. The HTTP API handler uses this base
+ * directly; {@link actionLayer} adds the schema-typed `VectorSearch` on top.
+ */
+export const baseActionLayer = <ConvexDataModel extends GenericDataModel>(
+  ctx: GenericActionCtx<ConvexDataModel>,
+) => Layer.mergeAll(Auth.layer(ctx.auth), actionContextLayer(ctx, IdScope.app));
 
 export const actionLayer = <
   DatabaseSchema_ extends DatabaseSchema.AnyWithProps,
@@ -363,6 +365,10 @@ export const actionLayer = <
   >,
 ) =>
   Layer.mergeAll(
-    baseActionLayer(ctx),
+    actionContextLayer(ctx, databaseSchema.target.scope),
+    Auth.layerForTarget<DatabaseSchema_["target"]>(
+      databaseSchema.target,
+      ctx.auth,
+    ),
     VectorSearch.layer(ctx.vectorSearch.bind(ctx)),
   );

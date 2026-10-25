@@ -1,8 +1,57 @@
+import * as IdScope from "@confect/core/IdScope";
+import * as Data from "effect/Data";
+import * as Match from "effect/Match";
 import * as Predicate from "effect/Predicate";
+import * as Record from "effect/Record";
 import type * as Table from "./Table";
 
 export const TypeId = "~@confect/server/DatabaseSchema";
 export type TypeId = typeof TypeId;
+
+/**
+ * A component schema was declared with the application's empty ID scope, which
+ * would make its IDs indistinguishable from the host application's.
+ */
+export class InvalidComponentScopeError extends Data.TaggedError(
+  "InvalidComponentScopeError",
+)<{
+  readonly scope: IdScope.IdScope;
+}> {
+  override get message(): string {
+    return "A component database schema requires a nonempty ID scope.";
+  }
+}
+
+/**
+ * A table in the schema's record is bound to a different name or ID scope than
+ * the key and target it was registered under.
+ */
+export class InvalidDatabaseSchemaTableError extends Data.TaggedError(
+  "InvalidDatabaseSchemaTableError",
+)<{
+  readonly name: string;
+  readonly tableName: string;
+  readonly scope: IdScope.IdScope;
+  readonly expectedScope: IdScope.IdScope;
+}> {
+  override get message(): string {
+    return `Table '${this.name}' must be bound to its database schema's name and ID scope.`;
+  }
+}
+
+export interface AppTarget {
+  readonly kind: "app";
+  readonly scope: IdScope.App;
+}
+
+export interface ComponentTarget<
+  Scope_ extends IdScope.IdScope = IdScope.IdScope,
+> {
+  readonly kind: "component";
+  readonly scope: Scope_;
+}
+
+export type Target = AppTarget | ComponentTarget;
 
 export interface Any {
   readonly [TypeId]: unknown;
@@ -17,16 +66,25 @@ export const isDatabaseSchema = (u: unknown): u is Any =>
  * lives entirely on each `Table` (its `Fields` and `Doc` are lazy memoised
  * getters), so this layer is a plain record indirection with no module-loading
  * or async machinery.
+ *
+ * `Target_` records where the schema runs: the application (the default) or an
+ * isolated component. It carries the ID scope every table in the record shares,
+ * so IDs read or written through a handler are scoped to that target.
  */
 export interface DatabaseSchema<
   Tables_ extends Readonly<Record<string, Table.AnyWithProps>> = {},
+  Target_ extends Target = AppTarget,
 > {
   readonly [TypeId]: Readonly<Tables_>;
+  readonly target: Target_;
 }
 
 export interface AnyWithProps extends DatabaseSchema<
-  Readonly<Record<string, Table.AnyWithProps>>
+  Readonly<Record<string, Table.AnyWithProps>>,
+  Target
 > {}
+
+export type Scope<Schema extends AnyWithProps> = Schema["target"]["scope"];
 
 export type Tables<DatabaseSchema_ extends AnyWithProps> =
   DatabaseSchema_[TypeId][keyof DatabaseSchema_[TypeId]];
@@ -50,11 +108,45 @@ export type TableWithName<
 
 /**
  * Construct a database schema from its bound table record. The record's keys
- * must match their tables' names. Table schemas remain lazy; construction only
- * stores the record. The empty case is `make({})`.
+ * must match their tables' names, and every table must be bound to the target's
+ * ID scope. Table schemas remain lazy; construction only stores the record and
+ * target. The empty case is `make({})`.
  */
 export const make = <
   const TablesRecord extends Readonly<Record<string, Table.AnyWithProps>>,
+  const Target_ extends Target = AppTarget,
 >(
   tableRecord: TablesRecord,
-): DatabaseSchema<TablesRecord> => ({ [TypeId]: tableRecord });
+  target?: Target_,
+): DatabaseSchema<TablesRecord, Target_> => {
+  const resolvedTarget: Target = target ?? {
+    kind: "app",
+    scope: IdScope.app,
+  };
+  Match.value(resolvedTarget.kind).pipe(
+    Match.when("app", () => {}),
+    Match.when("component", () => {
+      if (resolvedTarget.scope === "") {
+        // Construction runs at module load (generated codegen output), so this
+        // misconfiguration can only be reported by throwing; the error is
+        // tagged so boundary code can identify it.
+        throw new InvalidComponentScopeError({ scope: resolvedTarget.scope });
+      }
+    }),
+    Match.exhaustive,
+  );
+  for (const [name, table] of Record.toEntries(tableRecord)) {
+    if (name !== table.tableName || table.scope !== resolvedTarget.scope) {
+      throw new InvalidDatabaseSchemaTableError({
+        name,
+        tableName: table.tableName,
+        scope: table.scope,
+        expectedScope: resolvedTarget.scope,
+      });
+    }
+  }
+  return {
+    [TypeId]: tableRecord,
+    target: resolvedTarget,
+  } as DatabaseSchema<TablesRecord, Target_>;
+};

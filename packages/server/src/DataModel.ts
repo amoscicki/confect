@@ -1,3 +1,4 @@
+import type * as GenericId from "@confect/core/GenericId";
 import type * as DatabaseSchema from "./DatabaseSchema";
 import type * as Table from "./Table";
 import type * as TableInfo from "./TableInfo";
@@ -70,3 +71,15 @@ export type DocumentByName<
   DataModel_ extends AnyWithProps,
   TableName extends TableNames<DataModel_>,
 > = DocumentWithName<DataModel_, TableName>;
+
+/**
+ * A document ID in the scope its table was bound to: a component's `users` ID
+ * is not interchangeable with the host application's.
+ */
+export type Id<
+  DataModel_ extends AnyWithProps,
+  TableName extends TableNames<DataModel_>,
+> = GenericId.GenericId<
+  TableName,
+  Table.Scope<TableWithName<DataModel_, TableName>>
+>;

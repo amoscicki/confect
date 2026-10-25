@@ -1,3 +1,4 @@
+import * as IdScope from "@confect/core/IdScope";
 import { compileTableSchema } from "@confect/core/SchemaToValidator";
 import * as Table_ from "@confect/core/Table";
 import * as Schema from "effect/Schema";
@@ -22,6 +23,7 @@ export {
   type VectorIndexes,
   type Doc,
   type Fields,
+  type Scope,
   type WithName,
   type TablesRecord,
 } from "@confect/core/Table";
@@ -59,7 +61,7 @@ export const tableDefinition = <Table extends Table_.AnyWithProps>(
   }
 
   let definition: TableDefinition<any, any, any, any> = defineTable(
-    compileTableSchema(table.Fields),
+    compileTableSchema(table.Fields, table.scope),
   );
   for (const [name, indexFields] of Object.entries(
     table.indexes as Record<string, any>,
@@ -122,4 +124,65 @@ export const systemTables = {
   _storage: storageTable,
 } as const;
 
-export type SystemTables = typeof scheduledFunctionsTable | typeof storageTable;
+/**
+ * The system tables rebound to a target's ID scope, so a component handler's
+ * `_storage`/`_scheduled_functions` IDs cannot be confused with the host app's.
+ * The record's values remain the system table schemas: rebinding only changes
+ * the ID scope, and nothing here forces their lazy `Fields`/`Doc`.
+ */
+export type SystemTablesRecord<Scope_ extends IdScope.IdScope = IdScope.App> = {
+  readonly _scheduled_functions: Table_.Table<
+    "_scheduled_functions",
+    Table_.TableSchema<typeof scheduledFunctionsTable>,
+    Table_.TableValidator<typeof scheduledFunctionsTable>,
+    {},
+    {},
+    {},
+    Scope_
+  >;
+  readonly _storage: Table_.Table<
+    "_storage",
+    Table_.TableSchema<typeof storageTable>,
+    Table_.TableValidator<typeof storageTable>,
+    {},
+    {},
+    {},
+    Scope_
+  >;
+};
+
+export type SystemTables<Scope_ extends IdScope.IdScope = IdScope.App> =
+  SystemTablesRecord<Scope_>[keyof SystemTablesRecord<Scope_>];
+
+// `DatabaseReader.make` resolves the system tables on every handler invocation,
+// so a record is built once per component scope and reused. The tables'
+// `Fields` thunks still defer to the module-level schemas: caching the record
+// memoises allocation, not schema construction.
+const scopedSystemTables = new Map<string, SystemTablesRecord>();
+
+/**
+ * The system tables rebound to a target's ID scope. The application scope
+ * returns the module-level tables; every other scope returns a memoised record
+ * of two tables whose `Fields` thunks defer to the module-level schemas, so
+ * resolving it forces nothing.
+ */
+export const systemTablesForScope = <const Scope_ extends IdScope.IdScope>(
+  scope: Scope_,
+): SystemTablesRecord<Scope_> => {
+  if (scope === IdScope.app) {
+    return systemTables as unknown as SystemTablesRecord<Scope_>;
+  }
+  const cached = scopedSystemTables.get(scope);
+  if (cached !== undefined) {
+    return cached as SystemTablesRecord<Scope_>;
+  }
+  const record = {
+    _scheduled_functions: Table_.make(() => scheduledFunctionsTable.Fields)(
+      "_scheduled_functions",
+      scope,
+    ),
+    _storage: Table_.make(() => storageTable.Fields)("_storage", scope),
+  } as unknown as SystemTablesRecord;
+  scopedSystemTables.set(scope, record);
+  return record as SystemTablesRecord<Scope_>;
+};

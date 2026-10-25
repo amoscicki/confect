@@ -1,4 +1,5 @@
 import { GenericId } from "@confect/core";
+import * as IdScope from "@confect/core/IdScope";
 import { describe, expect, expectTypeOf, it } from "@effect/vitest";
 import {
   defineTable,
@@ -268,6 +269,49 @@ describe("Table.tableDefinition", () => {
       void notes.Fields;
       void Table.tableDefinition(notes);
       expect(calls.count).toBe(1);
+    });
+  });
+
+  describe("systemTablesForScope", () => {
+    it("reuses the module-level tables for the application scope", () => {
+      const app = Table.systemTablesForScope(IdScope.app);
+      expect(app).toBe(Table.systemTables);
+      expect(app._storage).toBe(Table.storageTable);
+      expect(app._scheduled_functions).toBe(Table.scheduledFunctionsTable);
+    });
+
+    it("memoises one record per component scope", () => {
+      const scope = IdScope.component("scoped-system-tables");
+      const first = Table.systemTablesForScope(scope);
+      const second = Table.systemTablesForScope(scope);
+
+      // Handlers resolve the system tables on every invocation, so a scope
+      // keeps one record: repeated calls return the identical object while
+      // distinct scopes stay isolated.
+      expect(first).toBe(second);
+      expect(first._storage).toBe(second._storage);
+      expect(first._storage).not.toBe(Table.storageTable);
+      expect(first._storage.scope).toBe(scope);
+      expect(first._scheduled_functions.scope).toBe(scope);
+      // The application record is still the module-level one, not a cache entry.
+      expect(Table.systemTablesForScope(IdScope.app)).toBe(Table.systemTables);
+      expect(Table.systemTablesForScope(scope)).not.toBe(Table.systemTables);
+      // The scoped tables' documents carry the component-scoped ID.
+      expectTypeOf<
+        Schema.Schema.Type<typeof first._storage.Doc>["_id"]
+      >().toEqualTypeOf<GenericId.GenericId<"_storage", typeof scope>>();
+    });
+
+    it("keeps the scoped schemas lazy and shared with the module tables", () => {
+      const scope = IdScope.component("lazy-system-tables");
+      const scoped = Table.systemTablesForScope(scope);
+
+      // Building a scope installs lazy `Fields`/`Doc` getters without running
+      // them; the descriptor is still an accessor before first access.
+      expect(
+        Object.getOwnPropertyDescriptor(scoped._storage, "Fields"),
+      ).toMatchObject({ enumerable: true, configurable: true });
+      expect(scoped._storage.Fields).toBe(Table.storageTable.Fields);
     });
   });
 });

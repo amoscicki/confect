@@ -103,7 +103,19 @@ const nodeActionFunction = <
     resolvedMiddlewares: ReadonlyArray<ResolvedMiddleware.ResolvedMiddleware>;
   },
 ) =>
-  RegisteredFunction.actionFunctionBase({
+  RegisteredFunction.actionFunctionBase<
+    DatabaseSchema_,
+    Args,
+    ConvexArgs,
+    Returns,
+    ConvexReturns,
+    E,
+    | RegisteredFunction.ActionServices<DatabaseSchema_>
+    | NodeServices.NodeServices
+  >({
+    // Args/returns validators must compile in the schema's scope, so scoped
+    // IDs keep Convex-side `v.id(table)` validation (see `convexActionFunction`).
+    scope: databaseSchema.target.scope,
     name,
     functionVisibility,
     args,
