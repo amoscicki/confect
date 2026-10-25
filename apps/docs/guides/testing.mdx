@@ -49,7 +49,9 @@ export const layer = TestConfect_.layer(
 );
 ```
 
-Every time the `TestConfect` layer is constructed, a new test database is created. If you want a clean database for each test, provide the layer on a per-test basis (as shown below). If you want to share state across tests in a describe block, you can provide the layer at a higher scope instead.
+Every time the `layer` built above is constructed, a new test database is created. If you want a clean database for each test, provide the layer on a per-test basis (as shown below). If you want to share state across tests in a describe block, you can provide the layer at a higher scope instead.
+
+`TestConfect.layerFromInstance` is the exception: it wraps a `convexTest` instance you create yourself, so that instance—its database and any components registered on it—is shared and never reset. Build the instance once per describe block and provide the layer per test; see [testing components](#testing-components).
 
 ## Writing tests
 
@@ -216,3 +218,59 @@ Effect.gen(function* () {
   });
 });
 ```
+
+## Testing components
+
+A [component](/server/components) is not part of the application's Convex deployment definition, so `TestConfect` cannot discover installed components from the generated app schema. Register each one you use with `registerComponent` before calling functions that reach it:
+
+```ts
+import { counterModules, counterSchema } from "@example/counter/test";
+import * as Effect from "effect/Effect";
+
+import { primary } from "../confect/counters";
+import * as TestConfect from "./TestConfect";
+
+Effect.gen(function* () {
+  const t = yield* TestConfect.TestConfect;
+
+  yield* t.registerComponent("primaryCounter", counterSchema, counterModules);
+
+  yield* t.mutation(primary.counter.create, { count: 3 });
+});
+```
+
+`componentPath` must match the path the component is installed at—the `name` passed to `app.use`, qualified by every enclosing component mount when it is nested (`"parent/child"`). The schema and module map are the component's own Convex definitions; a published component package can expose them, along with a `register` helper, from a `/test` entry point.
+
+Each call replaces any registration at the same path with a fresh database, so documents written to that installation are discarded. Register the same definition at several paths to test that installations stay isolated, and to check that their ID types remain distinct.
+
+```ts
+Effect.gen(function* () {
+  const t = yield* TestConfect.TestConfect;
+
+  yield* t.registerComponent("first", counterSchema, counterModules);
+  yield* t.registerComponent("second", counterSchema, counterModules);
+});
+```
+
+A component package's own `register` helper typically takes a `convexTest` instance rather than a `TestConfect` service. To use one, build the instance first, register on it, then provide `layerFromInstance`. Unlike `layer`, this layer never resets the instance, so state written through either interface is visible through the other:
+
+```ts test/TestConfect.ts
+/// <reference types="vite/client" />
+
+import { TestConfect as TestConfect_ } from "@confect/test";
+import { convexTest } from "convex-test";
+
+import confectSchema from "./confect/_generated/schema";
+import convexSchema from "./confect/_generated/convexSchema";
+import { register } from "@example/counter/test";
+
+const instance = convexTest(
+  convexSchema,
+  import.meta.glob("./convex/**/!(*.*.*)*.*s"),
+);
+register(instance, "primaryCounter");
+
+export const layer = TestConfect_.layerFromInstance(confectSchema, instance);
+```
+
+Build the instance once per `describe` block if the tests share state. For a clean component database per test, use `layer` and call `registerComponent` inside each test instead.
